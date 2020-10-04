@@ -160,6 +160,10 @@ def convert_code_block(html):
             else:
                 lang = 'none'
 
+            # fix language
+            if lang == 'sh':
+                lang = 'bash'
+
             conf_ml = conf_ml + '<ac:parameter ac:name="language">' + lang + '</ac:parameter>'
             content = re.search(r'<pre><code.*?>(.*?)</code></pre>', tag, re.DOTALL).group(1)
             content = '<ac:plain-text-body><![CDATA[' + content + ']]></ac:plain-text-body>'
