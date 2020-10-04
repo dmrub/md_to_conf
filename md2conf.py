@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """
 # --------------------------------------------------------------------------------------------------
 # Rittman Mead Markdown to Confluence Tool
@@ -146,12 +146,12 @@ def convert_code_block(html):
     :param html: string
     :return: modified html string
     """
-    code_blocks = re.findall(r'<pre><code.*?>.*?</code></pre>', html, re.DOTALL)
+    code_blocks = re.findall(r'<pre[^>]*?><code.*?>.*?</code></pre>', html, re.DOTALL)
     if code_blocks:
         for tag in code_blocks:
 
             conf_ml = '<ac:structured-macro ac:name="code">'
-            conf_ml = conf_ml + '<ac:parameter ac:name="theme">Midnight</ac:parameter>'
+            conf_ml = conf_ml + '<ac:parameter ac:name="theme">Confluence</ac:parameter>'
             conf_ml = conf_ml + '<ac:parameter ac:name="linenumbers">true</ac:parameter>'
 
             lang = re.search('code class="(.*)"', tag)
@@ -161,11 +161,13 @@ def convert_code_block(html):
                 lang = 'none'
 
             # fix language
+            if lang.startswith('language-'):
+                lang = lang[9:]
             if lang == 'sh':
                 lang = 'bash'
 
             conf_ml = conf_ml + '<ac:parameter ac:name="language">' + lang + '</ac:parameter>'
-            content = re.search(r'<pre><code.*?>(.*?)</code></pre>', tag, re.DOTALL).group(1)
+            content = re.search(r'<pre[^>]*?><code.*?>(.*?)</code></pre>', tag, re.DOTALL).group(1)
             content = '<ac:plain-text-body><![CDATA[' + content + ']]></ac:plain-text-body>'
             conf_ml = conf_ml + content + '</ac:structured-macro>'
             conf_ml = conf_ml.replace('&lt;', '<').replace('&gt;', '>')
@@ -790,7 +792,7 @@ def main():
 
     with codecs.open(MARKDOWN_FILE, 'r', 'utf-8') as mdfile:
         html = markdown.markdown(mdfile.read(), extensions=['markdown.extensions.tables',
-                                                       'markdown.extensions.fenced_code'])
+                                                            'pymdownx.superfences'])
 
     html = '\n'.join(html.split('\n')[1:])
 
