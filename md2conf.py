@@ -395,17 +395,21 @@ def add_images(page_id, html):
 
     for tag in re.findall('<img(.*?)\/>', html):
         rel_path = re.search('src="(.*?)"', tag).group(1)
-        alt_text = re.search('alt="(.*?)"', tag).group(1)
+        alt_text = re.search('alt="(.*?)"', tag)
+        if alt_text:
+            comment = alt_text.group(1)
+        else:
+            comment = ''
         abs_path = os.path.join(source_folder, rel_path)
         basename = os.path.basename(rel_path)
-        upload_attachment(page_id, abs_path, alt_text)
+        upload_attachment(page_id, abs_path, comment)
         if re.search('http.*', rel_path) is None:
             if CONFLUENCE_API_URL.endswith('/wiki'):
-                html = html.replace('%s' % (rel_path),
-                                    '/wiki/download/attachments/%s/%s' % (page_id, basename))
+                html = html.replace('%s' % (rel_path,),
+                                    '/wiki/confluence/download/attachments/%s/%s' % (page_id, basename))
             else:
-                html = html.replace('%s' % (rel_path),
-                                    '/download/attachments/%s/%s' % (page_id, basename))
+                html = html.replace('%s' % (rel_path,),
+                                    '/confluence/download/attachments/%s/%s' % (page_id, basename))
     return html
 
 
@@ -507,7 +511,7 @@ def add_local_refs(page_id, title, html):
                 ref = matches.group(1)
                 alt = matches.group(2)
 
-                result_ref = headers_map[ref]
+                result_ref = headers_map.get(ref)
 
                 if result_ref:
                     base_uri = '%s/spaces/%s/pages/%s/%s' % (CONFLUENCE_API_URL, SPACE_KEY, page_id, '+'.join(title.split()))
@@ -518,6 +522,8 @@ def add_local_refs(page_id, title, html):
 
                     replacement = '<a href="%s" title="%s">%s</a>' % (replacement_uri, alt, alt)
                     html = html.replace(link, replacement)
+                else:
+                    LOGGER.warning('Unknown reference %s', ref)
 
     return html
 
