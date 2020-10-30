@@ -23,6 +23,7 @@ import urllib
 import webbrowser
 import requests
 import markdown
+import confluence_toc
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - \
 %(levelname)s - %(funcName)s [%(lineno)d] - \
@@ -797,7 +798,9 @@ def main():
     LOGGER.info('Title:\t\t%s', title)
 
     with codecs.open(MARKDOWN_FILE, 'r', 'utf-8') as mdfile:
+        confluence_toc_ext = confluence_toc.makeExtension(confluence_title=title)
         html = markdown.markdown(mdfile.read(), extensions=['markdown.extensions.tables',
+                                                            confluence_toc_ext,
                                                             'pymdownx.superfences'])
 
     html = '\n'.join(html.split('\n')[1:])
