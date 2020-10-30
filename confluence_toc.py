@@ -324,6 +324,9 @@ class TocTreeprocessor(Treeprocessor):
                     self.add_permalink(el, el.attrib["id"])
 
         if headings:
+            if not self.confluence_title:
+                self.confluence_title = headings[0].text
+
             # http://effbot.org/zone/element.htm#accessing-parents
             parent_map = dict((c, p) for p in doc.getiterator() for c in p)
             for heading in headings:
@@ -362,6 +365,8 @@ class TocTreeprocessor(Treeprocessor):
             toc = pp.run(toc)
         self.md.toc_tokens = toc_tokens
         self.md.toc = toc
+        self.md.headings = headings
+        self.md.title = self.confluence_title
 
 
 class ConfluenceTocExtension(Extension):
@@ -422,6 +427,8 @@ class ConfluenceTocExtension(Extension):
         md.treeprocessors.register(tocext, 'toc', 5)
 
     def reset(self):
+        self.md.title = ''
+        self.md.headings = []
         self.md.toc = ''
         self.md.toc_tokens = []
 

@@ -642,6 +642,7 @@ def update_page(page_id, title, body, version, ancestors, properties, attachment
 
     # Add images and attachments
     body = add_images(page_id, body)
+    LOGGER.info('body after images: %s', body)
     add_attachments(page_id, attachments)
 
     # Add local references
@@ -771,6 +772,7 @@ def upload_attachment(page_id, file, comment):
     session.headers.update({'X-Atlassian-Token': 'no-check'})
 
     LOGGER.info('\tUploading attachment %s...', filename)
+    LOGGER.info('\tURL %s...', url)
 
     response = session.post(url, files=file_to_upload)
     response.raise_for_status()
@@ -791,17 +793,14 @@ def main():
     LOGGER.info('Markdown file:\t%s', MARKDOWN_FILE)
     LOGGER.info('Space Key:\t%s', SPACE_KEY)
 
-    with open(MARKDOWN_FILE, 'r') as mdfile:
-        title = mdfile.readline().lstrip('#').strip()
-        mdfile.seek(0)
-
-    LOGGER.info('Title:\t\t%s', title)
-
     with codecs.open(MARKDOWN_FILE, 'r', 'utf-8') as mdfile:
-        confluence_toc_ext = confluence_toc.makeExtension(confluence_title=title)
+        confluence_toc_ext = confluence_toc.makeExtension()
         html = markdown.markdown(mdfile.read(), extensions=['markdown.extensions.tables',
                                                             confluence_toc_ext,
                                                             'pymdownx.superfences'])
+        title = confluence_toc_ext.md.title
+
+    LOGGER.info('Title:\t\t%s', title)
 
     html = '\n'.join(html.split('\n')[1:])
 
