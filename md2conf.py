@@ -24,6 +24,9 @@ import webbrowser
 import requests
 import markdown
 import confluence_toc
+from bs4 import BeautifulSoup, Comment
+
+PageInfo = collections.namedtuple('PageInfo', ['id', 'version', 'link', 'properties'])
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - \
 %(levelname)s - %(funcName)s [%(lineno)d] - \
@@ -50,6 +53,8 @@ PARSER.add_argument('-c', '--contents', action='store_true', default=False,
                     help='Use this option to generate a contents page.')
 PARSER.add_argument('-g', '--nogo', action='store_true', default=False,
                     help='Use this option to skip navigation after upload.')
+PARSER.add_argument('--noupload', action='store_true', default=False,
+                    help='Use this option to skip uploading.')
 PARSER.add_argument('-n', '--nossl', action='store_true', default=False,
                     help='Use this option if NOT using SSL. Will use HTTP instead of HTTPS.')
 PARSER.add_argument('-d', '--delete', action='store_true', default=False,
@@ -58,10 +63,13 @@ PARSER.add_argument('-l', '--loglevel', default='INFO',
                     help='Use this option to set the log verbosity.')
 PARSER.add_argument('-s', '--simulate', action='store_true', default=False,
                     help='Use this option to only show conversion result.')
+PARSER.add_argument('-w', '--write-document', metavar='FILE',
+                    help='Write generated Confluence HTML to file.')
 PARSER.add_argument('-v', '--version', type=int, action='store', default=1,
                     help='Version of confluence page (default is 1).')
 PARSER.add_argument('-mds', '--markdownsrc', action='store', default='',
-                    help='Use this option to specify a markdown source (i.e. what processor this markdown was targeting). '
+                    help='Use this option to specify a markdown source (i.e. what processor this markdown was '
+                         'targeting). '
                          'Possible values: bitbucket.')
 PARSER.add_argument('--label', action='append', dest='labels', default=[],
                     help='A list of labels to set on the page.')
@@ -92,6 +100,8 @@ try:
     ATTACHMENTS = ARGS.attachment
     GO_TO_PAGE = not ARGS.nogo
     CONTENTS = ARGS.contents
+    UPLOAD_ATTACHMENTS = not ARGS.noupload
+    WRITE_DOCUMENT = ARGS.write_document
 
     if USERNAME is None:
         LOGGER.error('Error: Username not specified by environment variable or option.')
@@ -125,58 +135,51 @@ except Exception as err:
     LOGGER.error('\nFailed to process command line arguments. Exiting.')
     sys.exit(1)
 
-def convert_comment_block(html):
-    """
-    Convert markdown code bloc to Confluence hidden comment
+CONFLUENCE_MARKUP = 'CONFLUENCE-MARKUP'
+CONFLUENCE_MARKUP_LEN = len(CONFLUENCE_MARKUP)
 
-    :param html: string
-    :return: modified html string
-    """
-    open_tag = '<ac:placeholder>'
-    close_tag = '</ac:placeholder>'
+def convert_comment_block_to_confluence(doc_root):
+    for comment in doc_root.find_all(text=lambda text: isinstance(text, Comment)):
+        if comment.startswith(CONFLUENCE_MARKUP) and len(comment) > CONFLUENCE_MARKUP_LEN \
+                and comment[CONFLUENCE_MARKUP_LEN].isspace():
+            conf_ml = comment[CONFLUENCE_MARKUP_LEN + 1:]
+        else:
+            conf_ml = '<ac:placeholder>' + comment + '</ac:placeholder>'
+        nodes = BeautifulSoup(conf_ml, features="html.parser")
+        comment.replaceWith(nodes)
 
-    html = html.replace('<!--', open_tag).replace('-->', close_tag)
-
-    return html
+    return doc_root
 
 
-def convert_code_block(html):
-    """
-    Convert html code blocks to Confluence macros
-
-    :param html: string
-    :return: modified html string
-    """
-    code_blocks = re.findall(r'<pre[^>]*?><code.*?>.*?</code></pre>', html, re.DOTALL)
-    if code_blocks:
-        for tag in code_blocks:
+def convert_code_block_to_confluence(doc_root):
+    for pre in doc_root.find_all('pre'):
+        code = pre.find('code')
+        if code:
+            classes = code.attrs.get('class', [])
+            # fix language
+            lang = 'none'
+            for class_ in classes:
+                if class_.startswith('language-'):
+                    lang = class_[9:]
+                    if lang == 'sh':
+                        lang = 'bash'
+                    if lang != 'none':
+                        break
 
             conf_ml = '<ac:structured-macro ac:name="code">'
             conf_ml = conf_ml + '<ac:parameter ac:name="theme">Confluence</ac:parameter>'
             conf_ml = conf_ml + '<ac:parameter ac:name="linenumbers">true</ac:parameter>'
 
-            lang = re.search('code class="(.*)"', tag)
-            if lang:
-                lang = lang.group(1)
-            else:
-                lang = 'none'
-
-            # fix language
-            if lang.startswith('language-'):
-                lang = lang[9:]
-            if lang == 'sh':
-                lang = 'bash'
-
             conf_ml = conf_ml + '<ac:parameter ac:name="language">' + lang + '</ac:parameter>'
-            content = re.search(r'<pre[^>]*?><code.*?>(.*?)</code></pre>', tag, re.DOTALL).group(1)
-            content = '<ac:plain-text-body><![CDATA[' + content + ']]></ac:plain-text-body>'
+            content = '<ac:plain-text-body><![CDATA[' + code.text + ']]></ac:plain-text-body>'
             conf_ml = conf_ml + content + '</ac:structured-macro>'
             conf_ml = conf_ml.replace('&lt;', '<').replace('&gt;', '>')
             conf_ml = conf_ml.replace('&quot;', '"').replace('&amp;', '&')
 
-            html = html.replace(tag, conf_ml)
+            nodes = BeautifulSoup(conf_ml, features="html.parser")
+            pre.replaceWith(nodes)
 
-    return html
+    return doc_root
 
 
 def convert_info_macros(html):
@@ -240,7 +243,7 @@ def convert_doctoc(html):
     </ac:structured-macro>
     </p>'''
 
-    html = re.sub('\<\!\-\- START doctoc.*END doctoc \-\-\>', toc_tag, html, flags=re.DOTALL)
+    html = re.sub('<!-- START doctoc.*END doctoc -->', toc_tag, html, flags=re.DOTALL)
 
     return html
 
@@ -302,7 +305,7 @@ def process_refs(html):
     :param html: html string
     :return: modified html string
     """
-    refs = re.findall('\n(\[\^(\d)\].*)|<p>(\[\^(\d)\].*)', html)
+    refs = re.findall('\n(\[\^(\d)].*)|<p>(\[\^(\d)].*)', html)
 
     if refs:
 
@@ -376,64 +379,26 @@ def get_page(title):
             properties = {}
             pass
 
-        page_info = collections.namedtuple('PageInfo', ['id', 'version', 'link', 'properties'])
-        page = page_info(page_id, version_num, link, properties)
+        page = PageInfo(page_id, version_num, link, properties)
         return page
 
     return False
 
 
-# Scan for images and upload as attachments if found
-def add_images(page_id, html):
-    """
-    Scan for images and upload as attachments if found
-
-    :param page_id: Confluence page id
-    :param html: html string
-    :return: html with modified image reference
-    """
-    source_folder = os.path.dirname(os.path.abspath(MARKDOWN_FILE))
-
-    for tag in re.findall('<img(.*?)\/>', html):
-        rel_path = re.search('src="(.*?)"', tag).group(1)
-        alt_text = re.search('alt="(.*?)"', tag)
-        if alt_text:
-            comment = alt_text.group(1)
-        else:
-            comment = ''
-        abs_path = os.path.join(source_folder, rel_path)
-        basename = os.path.basename(rel_path)
-        upload_attachment(page_id, abs_path, comment)
-        if re.search('http.*', rel_path) is None:
-            if CONFLUENCE_API_URL.endswith('/wiki'):
-                html = html.replace('%s' % (rel_path,),
-                                    '/wiki/confluence/download/attachments/%s/%s' % (page_id, basename))
-            else:
-                html = html.replace('%s' % (rel_path,),
-                                    '/confluence/download/attachments/%s/%s' % (page_id, basename))
-    return html
-
-
-def add_contents(html):
-    """
-    Add contents page
-
-    :param html: html string
-    :return: modified html string
-    """
-    contents_markup = '<ac:structured-macro ac:name="toc">\n<ac:parameter ac:name="printable">' \
-                     'true</ac:parameter>\n<ac:parameter ac:name="style">disc</ac:parameter>'
-    contents_markup = contents_markup + '<ac:parameter ac:name="maxLevel">5</ac:parameter>\n' \
-                                      '<ac:parameter ac:name="minLevel">1</ac:parameter>'
-    contents_markup = contents_markup + '<ac:parameter ac:name="class">rm-contents</ac:parameter>\n' \
-                                      '<ac:parameter ac:name="exclude"></ac:parameter>\n' \
-                                      '<ac:parameter ac:name="type">list</ac:parameter>'
-    contents_markup = contents_markup + '<ac:parameter ac:name="outline">false</ac:parameter>\n' \
-                                      '<ac:parameter ac:name="include"></ac:parameter>\n' \
-                                      '</ac:structured-macro>'
-
-    html = contents_markup + '\n' + html
-    return html
+def add_confluence_toc(doc_root):
+    conf_ml = '<ac:structured-macro ac:name="toc">\n<ac:parameter ac:name="printable">' \
+              'true</ac:parameter>\n<ac:parameter ac:name="style">disc</ac:parameter>'
+    conf_ml = conf_ml + '<ac:parameter ac:name="maxLevel">5</ac:parameter>\n' \
+                        '<ac:parameter ac:name="minLevel">1</ac:parameter>'
+    conf_ml = conf_ml + '<ac:parameter ac:name="class">rm-contents</ac:parameter>\n' \
+                        '<ac:parameter ac:name="exclude"></ac:parameter>\n' \
+                        '<ac:parameter ac:name="type">list</ac:parameter>'
+    conf_ml = conf_ml + '<ac:parameter ac:name="outline">false</ac:parameter>\n' \
+                        '<ac:parameter ac:name="include"></ac:parameter>\n' \
+                        '</ac:structured-macro>'
+    nodes = BeautifulSoup(conf_ml, features="html.parser")
+    doc_root.insert(0, nodes)
+    return doc_root
 
 
 def add_attachments(page_id, files):
@@ -455,22 +420,21 @@ def add_local_refs(page_id, title, html):
     """
     Convert local links to correct confluence local links
 
-    :param page_title: string
     :param page_id: integer
     :param html: string
     :return: modified html string
     """
 
     ref_prefixes = {
-      "bitbucket": "#markdown-header-"
+        "bitbucket": "#markdown-header-"
     }
     ref_postfixes = {
-      "bitbucket": "_%d"
+        "bitbucket": "_%d"
     }
 
     # We ignore local references in case of unknown or unspecified markdown source
     if not MARKDOWN_SOURCE in ref_prefixes or \
-       not MARKDOWN_SOURCE in ref_postfixes:
+            not MARKDOWN_SOURCE in ref_postfixes:
         LOGGER.warning('Local references weren''t processed because '
                        '--markdownsrc wasn''t set or specified source isn''t supported')
         return html
@@ -515,7 +479,8 @@ def add_local_refs(page_id, title, html):
                 result_ref = headers_map.get(ref)
 
                 if result_ref:
-                    base_uri = '%s/spaces/%s/pages/%s/%s' % (CONFLUENCE_API_URL, SPACE_KEY, page_id, '+'.join(title.split()))
+                    base_uri = '%s/spaces/%s/pages/%s/%s' % (
+                        CONFLUENCE_API_URL, SPACE_KEY, page_id, '+'.join(title.split()))
                     if VERSION == 1:
                         replacement_uri = '%s#%s-%s' % (base_uri, ''.join(title.split()), result_ref)
                     if VERSION == 2:
@@ -529,12 +494,12 @@ def add_local_refs(page_id, title, html):
     return html
 
 
-def create_page(title, body, ancestors):
+def create_page(title, html, ancestors):
     """
     Create a new page
 
     :param title: confluence page title
-    :param body: confluence page content
+    :param html: confluence page content
     :param ancestors: confluence page ancestor
     :return:
     """
@@ -546,24 +511,25 @@ def create_page(title, body, ancestors):
     session.auth = (USERNAME, API_KEY)
     session.headers.update({'Content-Type': 'application/json'})
 
-    new_page = {'type': 'page', \
-               'title': title, \
-               'space': {'key': SPACE_KEY}, \
-               'body': { \
-                   'storage': { \
-                       'value': body, \
-                       'representation': 'storage' \
-                       } \
-                   }, \
-               'ancestors': ancestors, \
-               'metadata': { \
-                   'properties': { \
-            	  	     'editor': { \
-            	  		       'value': 'v%d' % VERSION \
-            	  	         } \
-              	       } \
-                   } \
-               }
+    new_page = {
+        'type': 'page',
+        'title': title,
+        'space': {'key': SPACE_KEY},
+        'body': {
+            'storage': {
+                'value': html,
+                'representation': 'storage'
+            }
+        },
+        'ancestors': ancestors,
+        'metadata': {
+            'properties': {
+                'editor': {
+                    'value': 'v%d' % VERSION
+                }
+            }
+        }
+    }
 
     LOGGER.debug("data: %s", json.dumps(new_page))
 
@@ -590,16 +556,19 @@ def create_page(title, body, ancestors):
             for key in PROPERTIES:
                 properties[key] = {"key": key, "version": 1, "value": PROPERTIES[key]}
 
-        img_check = re.search('<img(.*?)\/>', body)
-        local_ref_check = re.search('<a href="(#.+?)">(.+?)</a>', body)
+        page = PageInfo(page_id, version, link, properties)
+
+        img_check = re.search('<img(.*?)/>', html)
+        local_ref_check = re.search('<a href="(#.+?)">(.+?)</a>', html)
         if img_check or local_ref_check or properties or ATTACHMENTS or LABELS:
             LOGGER.info('\tAttachments, local references, content properties or labels found, update procedure called.')
-            update_page(page_id, title, body, version, ancestors, properties, ATTACHMENTS)
         else:
             if GO_TO_PAGE:
                 webbrowser.open(link)
+
+        return page
     else:
-        LOGGER.error('Could not create page.')
+        LOGGER.error('Could not create page, response code: %s', response.status_code)
         sys.exit(1)
 
 
@@ -626,27 +595,22 @@ def delete_page(page_id):
         LOGGER.error('Page %s could not be deleted.', page_id)
 
 
-def update_page(page_id, title, body, version, ancestors, properties, attachments):
+def update_page(page_id, title, html, version, ancestors, properties):
     """
     Update a page
 
     :param page_id: confluence page id
     :param title: confluence page title
-    :param body: confluence page content
+    :param html: confluence page content
     :param version: confluence page version
     :param ancestors: confluence page ancestor
-    :param attachments: confluence page attachments
+    :param properties
     :return: None
     """
     LOGGER.info('Updating page...')
 
-    # Add images and attachments
-    body = add_images(page_id, body)
-    LOGGER.info('body after images: %s', body)
-    add_attachments(page_id, attachments)
-
     # Add local references
-    body = add_local_refs(page_id, title, body)
+    # body = add_local_refs(page_id, title, body)
 
     url = '%s/rest/api/content/%s' % (CONFLUENCE_API_URL, page_id)
 
@@ -654,23 +618,23 @@ def update_page(page_id, title, body, version, ancestors, properties, attachment
     session.auth = (USERNAME, API_KEY)
     session.headers.update({'Content-Type': 'application/json'})
 
-    page_json = { \
-        "id": page_id, \
-        "type": "page", \
-        "title": title, \
-        "space": {"key": SPACE_KEY}, \
-        "body": { \
-            "storage": { \
-                "value": body, \
-                "representation": "storage" \
-                } \
-            }, \
-        "version": { \
-            "number": version + 1, \
-            "minorEdit" : True \
-            }, \
-        'ancestors': ancestors \
-        }
+    page_json = {
+        "id": page_id,
+        "type": "page",
+        "title": title,
+        "space": {"key": SPACE_KEY},
+        "body": {
+            "storage": {
+                "value": html,
+                "representation": "storage"
+            }
+        },
+        "version": {
+            "number": version + 1,
+            "minorEdit": True
+        },
+        'ancestors': ancestors
+    }
 
     if LABELS:
         if 'metadata' not in page_json:
@@ -697,7 +661,8 @@ def update_page(page_id, title, body, version, ancestors, properties, attachment
 
             for key in properties:
                 prop_url = '%s/property/%s' % (url, key)
-                prop_json = {"key": key, "version": {"number": properties[key][u"version"]}, "value": properties[key][u"value"]}
+                prop_json = {"key": key, "version": {"number": properties[key][u"version"]},
+                             "value": properties[key][u"value"]}
 
                 response = session.put(prop_url, data=json.dumps(prop_json))
                 response.raise_for_status()
@@ -761,6 +726,10 @@ def upload_attachment(page_id, file, comment):
         'file': (filename, open(file, 'rb'), content_type, {'Expires': '0'})
     }
 
+    if not UPLOAD_ATTACHMENTS:
+        LOGGER.info('\tSkip uploading attachment %s...', filename)
+        return True
+
     attachment = get_attachment(page_id, filename)
     if attachment:
         url = '%s/rest/api/content/%s/child/attachment/%s/data' % (CONFLUENCE_API_URL, page_id, attachment.id)
@@ -778,6 +747,12 @@ def upload_attachment(page_id, file, comment):
     response.raise_for_status()
 
     return True
+
+
+def document_to_html(root):
+    body = root.body if getattr(root, 'body', None) else root
+    html = '\n'.join((str(elem) for elem in body.children))
+    return html
 
 
 def main():
@@ -802,24 +777,27 @@ def main():
 
     LOGGER.info('Title:\t\t%s', title)
 
-    html = '\n'.join(html.split('\n')[1:])
+    doc_root = BeautifulSoup(html, features="html.parser")
 
-    html = convert_info_macros(html)
-    html = convert_comment_block(html)
-    html = convert_code_block(html)
+    # Remove first heading
+    header_rgx = re.compile("[Hh][123456]")
+    for child in doc_root.children:
+        if header_rgx.match(child.name) and child.text == title:
+            child.decompose()
+            break
+
+    doc_root = convert_code_block_to_confluence(doc_root)
+    doc_root = convert_comment_block_to_confluence(doc_root)
 
     if CONTENTS:
-        html = add_contents(html)
-
-    html = process_refs(html)
-
-    LOGGER.debug('html: %s', html)
+        doc_root = add_confluence_toc(doc_root)
+        pass
 
     if SIMULATE:
         LOGGER.info("Simulate mode is active - stop processing here.")
         sys.exit(0)
 
-    LOGGER.info('Checking if Atlas page exists...')
+    LOGGER.info('Checking if Confluence page exists...')
     page = get_page(title)
 
     if DELETE and page:
@@ -836,19 +814,61 @@ def main():
     else:
         ancestors = []
 
+    if not page:
+        html = document_to_html(doc_root)
+        page = create_page(title, html, ancestors)
+
+    # DEBUG
+    # with open('predoc.html', 'wt') as f:
+    #    f.write(html)
+    # END DEBUG
+
     if page:
         # Populate properties dictionary with updated property values
         properties = {}
         if PROPERTIES:
             for key in PROPERTIES:
                 if key in page.properties:
-                    properties[key] = {"key": key, "version": page.properties[key][u'version'][u'number'] + 1, "value": PROPERTIES[key]}
+                    properties[key] = {"key": key, "version": page.properties[key][u'version'][u'number'] + 1,
+                                       "value": PROPERTIES[key]}
                 else:
                     properties[key] = {"key": key, "version": 1, "value": PROPERTIES[key]}
 
-        update_page(page.id, title, html, page.version, ancestors, properties, ATTACHMENTS)
-    else:
-        create_page(title, html, ancestors)
+        source_folder = os.path.dirname(os.path.abspath(MARKDOWN_FILE))
+
+        images = []
+
+        # Process images
+        for elem in doc_root.find_all("img"):
+            rel_path = elem.attrs.get('src')
+            alt_text = elem.attrs.get('alt', '')
+            abs_path = os.path.join(source_folder, rel_path)
+            basename = os.path.basename(rel_path)
+            images.append((abs_path, alt_text))
+
+            if re.search('http.*', rel_path) is None:
+                if CONFLUENCE_API_URL.endswith('/wiki'):
+                    rel_path = '/wiki/confluence/download/attachments/%s/%s' % (page.id, basename)
+                else:
+                    rel_path = '/confluence/download/attachments/%s/%s' % (page.id, basename)
+            elem.attrs['src'] = rel_path
+
+        # convert processed html back to text
+        html = document_to_html(doc_root)
+        LOGGER.info('body after images: %s', html)
+
+        # Add images and attachments
+        for image_path, alt_text in images:
+            upload_attachment(page.id, image_path, alt_text)
+
+        add_attachments(page.id, ATTACHMENTS)
+
+        update_page(page.id, title, html, page.version, ancestors, properties)
+
+    if WRITE_DOCUMENT:
+        with open(WRITE_DOCUMENT, 'wt') as f:
+            f.write(html)
+        LOGGER.info('Wrote document to file %s', WRITE_DOCUMENT)
 
     LOGGER.info('Markdown Converter completed successfully.')
 

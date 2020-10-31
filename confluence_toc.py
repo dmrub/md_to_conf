@@ -303,6 +303,11 @@ class TocTreeprocessor(Treeprocessor):
                 if "id" not in el.attrib:
                     innertext = unescape(stashedHTML2text(text, self.md))
                     el.attrib["id"] = unique(self.slugify(innertext, self.sep), used_ids)
+
+                if not self.confluence_title:
+                    self.confluence_title = el.text
+                    continue
+
                 headings.append(el)
 
                 toc_tokens.append({
@@ -324,9 +329,6 @@ class TocTreeprocessor(Treeprocessor):
                     self.add_permalink(el, el.attrib["id"])
 
         if headings:
-            if not self.confluence_title:
-                self.confluence_title = headings[0].text
-
             # http://effbot.org/zone/element.htm#accessing-parents
             parent_map = dict((c, p) for p in doc.getiterator() for c in p)
             for heading in headings:
