@@ -138,6 +138,7 @@ except Exception as err:
 CONFLUENCE_MARKUP = 'CONFLUENCE-MARKUP'
 CONFLUENCE_MARKUP_LEN = len(CONFLUENCE_MARKUP)
 
+
 def convert_comment_block_to_confluence(doc_root):
     for comment in doc_root.find_all(text=lambda text: isinstance(text, Comment)):
         if comment.startswith(CONFLUENCE_MARKUP) and len(comment) > CONFLUENCE_MARKUP_LEN \
@@ -836,30 +837,48 @@ def main():
 
         source_folder = os.path.dirname(os.path.abspath(MARKDOWN_FILE))
 
-        images = []
+        local_attachments = []
 
         # Process images
         for elem in doc_root.find_all("img"):
-            rel_path = elem.attrs.get('src')
-            alt_text = elem.attrs.get('alt', '')
-            abs_path = os.path.join(source_folder, rel_path)
-            basename = os.path.basename(rel_path)
-            images.append((abs_path, alt_text))
+            img_src = elem.attrs.get('src')
+            url = urllib.parse.urlparse(img_src)
+            if url.scheme in ('', 'file') and url.path and not url.fragment:
+                abs_path = os.path.join(source_folder, url.path)
+                if os.path.exists(abs_path):
+                    alt_text = elem.attrs.get('alt', '')
+                    basename = os.path.basename(img_src)
+                    local_attachments.append((abs_path, alt_text))
+                    if CONFLUENCE_API_URL.endswith('/wiki'):
+                        img_src = '/wiki/confluence/download/attachments/%s/%s' % (page.id, basename)
+                    else:
+                        img_src = '/confluence/download/attachments/%s/%s' % (page.id, basename)
+                    LOGGER.debug('I will upload file %s to uri %s', abs_path, img_src)
+                    elem.attrs['src'] = img_src
 
-            if re.search('http.*', rel_path) is None:
-                if CONFLUENCE_API_URL.endswith('/wiki'):
-                    rel_path = '/wiki/confluence/download/attachments/%s/%s' % (page.id, basename)
-                else:
-                    rel_path = '/confluence/download/attachments/%s/%s' % (page.id, basename)
-            elem.attrs['src'] = rel_path
+        # Process local references
+        for elem in doc_root.find_all("a"):
+            href = elem.attrs.get("href")
+            url = urllib.parse.urlparse(href)
+            if url.scheme in ('', 'file') and url.path and not url.fragment:
+                abs_path = os.path.join(source_folder, url.path)
+                if os.path.exists(abs_path):
+                    basename = os.path.basename(href)
+                    local_attachments.append((abs_path, ''))
+                    if CONFLUENCE_API_URL.endswith('/wiki'):
+                        href = '/wiki/confluence/download/attachments/%s/%s' % (page.id, basename)
+                    else:
+                        href = '/confluence/download/attachments/%s/%s' % (page.id, basename)
+                    LOGGER.debug('I will upload file %s to uri %s', abs_path, href)
+                    elem.attrs['href'] = href
 
         # convert processed html back to text
         html = document_to_html(doc_root)
-        LOGGER.info('body after images: %s', html)
+        LOGGER.debug('body after processing local attachments: %s', html)
 
         # Add images and attachments
-        for image_path, alt_text in images:
-            upload_attachment(page.id, image_path, alt_text)
+        for local_file_path, alt_text in local_attachments:
+            upload_attachment(page.id, local_file_path, alt_text)
 
         add_attachments(page.id, ATTACHMENTS)
 
